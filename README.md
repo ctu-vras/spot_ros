@@ -24,7 +24,7 @@ Then, initialise the submodule for the wrapper we use to interact with the Bosto
 ```bash
 cd spot_ros
 git submodule init
-git submodule update
+git submodule update --remote
 ```
 
 Then, install the python package containing the wrapper
