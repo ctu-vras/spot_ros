@@ -67,6 +67,11 @@ from spot_msgs.srv import (
 from spot_msgs.srv import HandPose, HandPoseResponse, HandPoseRequest
 from spot_msgs.srv import Grasp3d, Grasp3dRequest, Grasp3dResponse
 
+# custom #########################################
+from spot_msgs.srv import ArmCartesianTrajectory, ArmCartesianTrajectoryResponse
+from spot_msgs.srv import GraspInImage, GraspInImageResponse
+##################################################
+
 from .ros_helpers import *
 from spot_wrapper.wrapper import SpotWrapper
 
@@ -1313,6 +1318,27 @@ class SpotROS:
 
     ##################################################################
 
+    # Arm functions-custom ###########################################
+    def handle_grasp_in_image(self, srv_data):
+        """ROS service handler to command the grasp object in image"""
+        camera_name = srv_data.camera_name
+        coords = (srv_data.px_coords.x, srv_data.px_coords.y)
+        resp = self.spot_wrapper.grasp_in_image(camera_name, coords)
+        return GraspInImageResponse(resp)
+
+    def handle_cartesian_trajectory(self, srv_data):
+        """ROS service handler to command the arm cartesian trajectory"""
+        root_frame = srv_data.root_frame
+        traj_time = srv_data.traj_time
+        poses = []
+        for pose in srv_data.poses:
+            pos = (pose.position.x, pose.position.y, pose.position.z)
+            rot = (pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w)
+            poses += [[pos, rot]]
+        resp = self.spot_wrapper.cartesian_trajectory(root_frame, traj_time, poses)
+        return ArmCartesianTrajectoryResponse(resp)
+    ##################################################################
+
     def shutdown(self):
         rospy.loginfo("Shutting down ROS driver for Spot")
         self.spot_wrapper.sit()
@@ -1744,6 +1770,11 @@ class SpotROS:
         )
         rospy.Service("gripper_pose", HandPose, self.handle_hand_pose)
         rospy.Service("grasp_3d", Grasp3d, self.handle_grasp_3d)
+        #########################################################
+
+        # Arm Services-custom ###################################
+        rospy.Service("grasp_in_image", GraspInImage, self.handle_grasp_in_image)
+        rospy.Service("arm_cartesian_trajectory", ArmCartesianTrajectory, self.handle_cartesian_trajectory)
         #########################################################
 
         self.navigate_as = actionlib.SimpleActionServer(
