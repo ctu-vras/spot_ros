@@ -56,6 +56,8 @@ add_service_files(
   Dock.srv
   GetDockState.srv
   Grasp3d.srv
+  GraspInImage.srv
+  ArmCartesianTrajectory.srv
 )
 
 add_action_files(

@@ -1,0 +1,5 @@
+string root_frame
+float64 traj_time
+geometry_msgs/Pose[] poses
+---
+bool success
