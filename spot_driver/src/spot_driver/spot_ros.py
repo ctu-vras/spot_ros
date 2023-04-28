@@ -70,6 +70,7 @@ from spot_msgs.srv import Grasp3d, Grasp3dRequest, Grasp3dResponse
 # custom #########################################
 from spot_msgs.srv import ArmCartesianTrajectory, ArmCartesianTrajectoryResponse
 from spot_msgs.srv import GraspInImage, GraspInImageResponse
+from spot_msgs.srv import ArmGaze, ArmGazeResponse
 ##################################################
 
 from .ros_helpers import *
@@ -1337,6 +1338,12 @@ class SpotROS:
             poses += [[pos, rot]]
         resp = self.spot_wrapper.cartesian_trajectory(root_frame, traj_time, poses)
         return ArmCartesianTrajectoryResponse(resp)
+
+    def handle_arm_gaze(self, srv_data):
+        """ROS service handler to command the arm gaze"""
+        p = srv_data.point
+        resp = self.spot_wrapper.arm_gaze([p[0], p[1], p[2]], srv_data.frame_name)
+        return ArmGazeResponse(resp)
     ##################################################################
 
     def shutdown(self):
