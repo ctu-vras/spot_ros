@@ -1782,6 +1782,7 @@ class SpotROS:
         # Arm Services-custom ###################################
         rospy.Service("grasp_in_image", GraspInImage, self.handle_grasp_in_image)
         rospy.Service("arm_cartesian_trajectory", ArmCartesianTrajectory, self.handle_cartesian_trajectory)
+        rospy.Service("arm_gaze", ArmGaze, self.handle_arm_gaze)
         #########################################################
 
         self.navigate_as = actionlib.SimpleActionServer(
