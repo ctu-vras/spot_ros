@@ -1342,7 +1342,7 @@ class SpotROS:
     def handle_arm_gaze(self, srv_data):
         """ROS service handler to command the arm gaze"""
         p = srv_data.point
-        resp = self.spot_wrapper.arm_gaze([p[0], p[1], p[2]], srv_data.frame_name)
+        resp = self.spot_wrapper.arm_gaze([p.x, p.y, p.z], srv_data.frame_name)
         return ArmGazeResponse(resp)
     ##################################################################
 
