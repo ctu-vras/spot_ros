@@ -58,6 +58,7 @@ add_service_files(
   Grasp3d.srv
   GraspInImage.srv
   ArmCartesianTrajectory.srv
+  ArmGaze.srv
 )
 
 add_action_files(
