@@ -2,3 +2,4 @@ string camera_name
 geometry_msgs/Point px_coords
 ---
 bool success
+string message

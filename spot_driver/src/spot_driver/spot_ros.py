@@ -1315,7 +1315,8 @@ class SpotROS:
             frame=srv_data.frame_name,
             object_rt_frame=srv_data.object_rt_frame,
         )
-        return Grasp3dResponse(resp[0], resp[1])
+        resp2 = self.spot_wrapper.unified_pickup(resp)
+        return Grasp3dResponse(resp2[0], resp2[1])
 
     ##################################################################
 
@@ -1325,7 +1326,8 @@ class SpotROS:
         camera_name = srv_data.camera_name
         coords = (srv_data.px_coords.x, srv_data.px_coords.y)
         resp = self.spot_wrapper.grasp_in_image(camera_name, coords)
-        return GraspInImageResponse(resp)
+        resp2 = self.spot_wrapper.unified_pickup(resp)
+        return GraspInImageResponse(resp2[0], resp2[1])
 
     def handle_cartesian_trajectory(self, srv_data):
         """ROS service handler to command the arm cartesian trajectory"""
