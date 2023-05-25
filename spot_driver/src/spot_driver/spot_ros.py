@@ -4,13 +4,14 @@ import rospy
 import math
 import time
 from std_srvs.srv import Trigger, TriggerResponse, SetBool, SetBoolResponse
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Header
 from tf2_msgs.msg import TFMessage
 from sensor_msgs.msg import Image, CameraInfo
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, PointField
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import TwistWithCovarianceStamped, Twist, Pose, PoseStamped
 from nav_msgs.msg import Odometry
+import sensor_msgs.point_cloud2 as pc2
 
 
 from bosdyn.api.spot import robot_command_pb2 as spot_command_pb2
@@ -24,6 +25,8 @@ import math
 import bosdyn.geometry
 import tf2_ros
 import tf2_geometry_msgs
+from bosdyn.client.local_grid import LocalGridClient
+from bosdyn.client.frame_helpers import get_a_tform_b
 
 from spot_msgs.msg import Metrics
 from spot_msgs.msg import LeaseArray, LeaseResource
@@ -79,6 +82,7 @@ from spot_wrapper.wrapper import SpotWrapper
 import actionlib
 import logging
 import threading
+import numpy as np
 
 
 class RateLimitedCall:
@@ -121,6 +125,7 @@ class SpotROS:
         self.callbacks["rear_image"] = self.RearImageCB
         self.callbacks["hand_image"] = self.HandImageCB
         self.callbacks["lidar_points"] = self.PointCloudCB
+        self.callbacks["local_grid"] = self.LocalGridCB
         self.active_camera_tasks = []
         self.camera_pub_to_async_task_mapping = {}
 
@@ -1348,6 +1353,47 @@ class SpotROS:
         return ArmGazeResponse(resp)
     ##################################################################
 
+    # Local grid #####################################################
+    def LocalGridCB(self, results):
+        """Callback for when the Spot Wrapper gets new local grid data.
+
+        Args:
+            results: FutureWrapper object of AsyncPeriodicQuery callback
+        """
+        #TODO: this takes just the first returned grid, make it work with more grids in the response
+        grid = self.spot_wrapper.local_grids[0].local_grid
+        if grid:
+            dt = np.dtype(np.int16)
+            dt = dt.newbyteorder('<')
+            data = np.frombuffer(grid.data, dtype=dt)
+            extent = grid.extent
+
+            data_arr = np.zeros(extent.num_cells_x*extent.num_cells_y)
+            id = 0
+            for i in range(len(grid.rle_counts)):
+                data_arr[id:id+grid.rle_counts[i]] = data[i]*grid.cell_value_scale+grid.cell_value_offset
+                id += grid.rle_counts[i]
+            data_grid = np.reshape(data_arr, (extent.num_cells_x, extent.num_cells_y),'F')
+
+            transform = get_a_tform_b(grid.transforms_snapshot, 'vision', grid.frame_name_local_grid_data)
+            mat = transform.to_matrix()
+            points = []
+            for x in range(data_grid.shape[0]):
+                for y in range(data_grid.shape[1]):
+                    points.append([extent.cell_size/2+x*extent.cell_size, extent.cell_size/2+y*extent.cell_size, data_grid[x,y], 1])
+
+            p_arr = np.array(points)
+            p_tf = np.matmul(mat, p_arr.T).T
+            p_list = p_tf[:,0:3].tolist()
+
+            h = Header()
+            h.stamp = rospy.Time.now()
+            h.frame_id = 'vision'
+            cloud = pc2.create_cloud_xyz32(h, p_list)
+            self.grid_pub.publish(cloud)
+
+    ##################################################################
+
     def shutdown(self):
         rospy.loginfo("Shutting down ROS driver for Spot")
         self.spot_wrapper.sit()
@@ -1720,6 +1766,9 @@ class SpotROS:
         self.mobility_params_pub = rospy.Publisher(
             "status/mobility_params", MobilityParams, queue_size=10
         )
+
+        #Local grid
+        self.grid_pub = rospy.Publisher("no_step", PointCloud2, queue_size=1)
 
         rospy.Subscriber("cmd_vel", Twist, self.cmdVelCallback, queue_size=1)
         rospy.Subscriber(
