@@ -1356,23 +1356,6 @@ class SpotROS:
     ##################################################################
 
     # Local grid #####################################################
-    def rle_decode(data, rle_counts, datatype, shape, cell_value_scale, cell_value_offset):
-        """decode local grid received as RLE encoded data"""
-        if datatype is None:
-            # the message has unknown datatype (specified in LocalGrid proto)
-            return None
-        dt = np.dtype(datatype)
-        dt = dt.newbyteorder('<')  # all of the datatypes in the grid message are little-endian
-        data = np.frombuffer(data, dtype=dt)
-        data_arr = np.zeros(shape[0]*shape[1])
-
-        id = 0
-        for i in range(len(rle_counts)):
-            data_arr[id:id+rle_counts[i]] = data[i]*cell_value_scale+cell_value_offset
-            id += rle_counts[i]
-        data_grid = np.reshape(data_arr, (shape[0], shape[1]),'F')
-        return data_grid
-
     def LocalGridCB(self, results):
         """Callback for when the Spot Wrapper gets new local grid data.
 
