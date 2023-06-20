@@ -8,11 +8,11 @@ from std_msgs.msg import Bool, Header
 from tf2_msgs.msg import TFMessage
 from sensor_msgs.msg import Image, CameraInfo
 from sensor_msgs.msg import PointCloud2, PointField
+from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import TwistWithCovarianceStamped, Twist, Pose, PoseStamped
 from nav_msgs.msg import Odometry
 import sensor_msgs.point_cloud2 as pc2
-
 
 from bosdyn.api.spot import robot_command_pb2 as spot_command_pb2
 from bosdyn.api import geometry_pb2, trajectory_pb2
@@ -83,6 +83,8 @@ import actionlib
 import logging
 import threading
 import numpy as np
+
+grid_dtypes = {0: None, 1: np.float32, 2: np.float64, 3: np.int8, 4: np.uint8, 5: np.int16, 6: np.uint16}
 
 
 class RateLimitedCall:
@@ -1354,6 +1356,23 @@ class SpotROS:
     ##################################################################
 
     # Local grid #####################################################
+    def rle_decode(data, rle_counts, datatype, shape, cell_value_scale, cell_value_offset):
+        """decode local grid received as RLE encoded data"""
+        if datatype is None:
+            # the message has unknown datatype (specified in LocalGrid proto)
+            return None
+        dt = np.dtype(datatype)
+        dt = dt.newbyteorder('<')  # all of the datatypes in the grid message are little-endian
+        data = np.frombuffer(data, dtype=dt)
+        data_arr = np.zeros(shape[0]*shape[1])
+
+        id = 0
+        for i in range(len(rle_counts)):
+            data_arr[id:id+rle_counts[i]] = data[i]*cell_value_scale+cell_value_offset
+            id += rle_counts[i]
+        data_grid = np.reshape(data_arr, (shape[0], shape[1]),'F')
+        return data_grid
+
     def LocalGridCB(self, results):
         """Callback for when the Spot Wrapper gets new local grid data.
 
@@ -1363,20 +1382,42 @@ class SpotROS:
         #TODO: this takes just the first returned grid, make it work with more grids in the response
         grid = self.spot_wrapper.local_grids[0].local_grid
         if grid:
-            dt = np.dtype(np.int16)
-            dt = dt.newbyteorder('<')
-            data = np.frombuffer(grid.data, dtype=dt)
             extent = grid.extent
 
-            data_arr = np.zeros(extent.num_cells_x*extent.num_cells_y)
-            id = 0
-            for i in range(len(grid.rle_counts)):
-                data_arr[id:id+grid.rle_counts[i]] = data[i]*grid.cell_value_scale+grid.cell_value_offset
-                id += grid.rle_counts[i]
-            data_grid = np.reshape(data_arr, (extent.num_cells_x, extent.num_cells_y),'F')
+            # decode
+            data_grid = rle_decode(grid.data, grid.rle_counts, grid_dtypes[grid.cell_format], (extent.num_cells_x, extent.num_cells_y), grid.cell_value_scale, grid.cell_value_offset)
+            if data_grid is None:
+                rospy.logwarn("Received local grid with unknown datatype")
+                return
 
-            transform = get_a_tform_b(grid.transforms_snapshot, 'vision', grid.frame_name_local_grid_data)
-            mat = transform.to_matrix()
+            # obtain the grid origin in vision frame
+            pose = get_a_tform_b(grid.transforms_snapshot, 'vision', grid.frame_name_local_grid_data)
+
+            # transform the costmap into occupancy grid, leave some margin around untraversable regions
+            occ = np.zeros_like(data_grid)
+            threshold = np.max(data_grid)/10.
+            occ[data_grid <= threshold] = 99
+            occ_l = occ.T.reshape((extent.num_cells_x*extent.num_cells_y)).astype(int).tolist()
+            
+            # build the OccupancyGrid message
+            o = OccupancyGrid()
+            o.header.stamp = rospy.Time.now()
+            o.header.frame_id = "vision"
+            o.info.map_load_time = rospy.Time.now()
+            o.info.resolution = extent.cell_size
+            o.info.width = extent.num_cells_x
+            o.info.height = extent.num_cells_y
+            o.info.origin.position.x = pose.x
+            o.info.origin.position.y = pose.y
+            o.info.origin.orientation.w = pose.rot.w
+            o.info.origin.orientation.x = pose.rot.x
+            o.info.origin.orientation.y = pose.rot.y
+            o.info.origin.orientation.z = pose.rot.z
+            o.data = occ_l
+            self.occ_pub.publish(o)
+
+            #publish costmap as PointCloud2
+            mat = pose.to_matrix()
             points = []
             for x in range(data_grid.shape[0]):
                 for y in range(data_grid.shape[1]):
@@ -1385,7 +1426,6 @@ class SpotROS:
             p_arr = np.array(points)
             p_tf = np.matmul(mat, p_arr.T).T
             p_list = p_tf[:,0:3].tolist()
-
             h = Header()
             h.stamp = rospy.Time.now()
             h.frame_id = 'vision'
@@ -1768,7 +1808,8 @@ class SpotROS:
         )
 
         #Local grid
-        self.grid_pub = rospy.Publisher("no_step", PointCloud2, queue_size=1)
+        self.grid_pub = rospy.Publisher("no_step/raw", PointCloud2, queue_size=1)
+        self.occ_pub = rospy.Publisher("no_step", OccupancyGrid, queue_size=1)
 
         rospy.Subscriber("cmd_vel", Twist, self.cmdVelCallback, queue_size=1)
         rospy.Subscriber(
