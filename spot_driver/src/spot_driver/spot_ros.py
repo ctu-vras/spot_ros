@@ -77,7 +77,7 @@ from spot_msgs.srv import ArmGaze, ArmGazeResponse
 ##################################################
 
 from .ros_helpers import *
-from spot_wrapper_custom.wrapper import SpotWrapper
+from spot_wrapper.wrapper import SpotWrapper
 
 import actionlib
 import logging
