@@ -4,14 +4,15 @@ import rospy
 import math
 import time
 from std_srvs.srv import Trigger, TriggerResponse, SetBool, SetBoolResponse
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Header
 from tf2_msgs.msg import TFMessage
 from sensor_msgs.msg import Image, CameraInfo
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, PointField
+from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import TwistWithCovarianceStamped, Twist, Pose, PoseStamped
 from nav_msgs.msg import Odometry
-
+import sensor_msgs.point_cloud2 as pc2
 
 from bosdyn.api.spot import robot_command_pb2 as spot_command_pb2
 from bosdyn.api import geometry_pb2, trajectory_pb2
@@ -24,6 +25,8 @@ import math
 import bosdyn.geometry
 import tf2_ros
 import tf2_geometry_msgs
+from bosdyn.client.local_grid import LocalGridClient
+from bosdyn.client.frame_helpers import get_a_tform_b
 
 from spot_msgs.msg import Metrics
 from spot_msgs.msg import LeaseArray, LeaseResource
@@ -67,12 +70,30 @@ from spot_msgs.srv import (
 from spot_msgs.srv import HandPose, HandPoseResponse, HandPoseRequest
 from spot_msgs.srv import Grasp3d, Grasp3dRequest, Grasp3dResponse
 
+# custom #########################################
+from spot_msgs.srv import ArmCartesianTrajectory, ArmCartesianTrajectoryResponse
+from spot_msgs.srv import GraspInImage, GraspInImageResponse
+from spot_msgs.srv import ArmGaze, ArmGazeResponse
+
+##################################################
+
 from .ros_helpers import *
 from spot_wrapper.wrapper import SpotWrapper
 
 import actionlib
 import logging
 import threading
+import numpy as np
+
+grid_dtypes = {
+    0: None,
+    1: np.float32,
+    2: np.float64,
+    3: np.int8,
+    4: np.uint8,
+    5: np.int16,
+    6: np.uint16,
+}
 
 
 class RateLimitedCall:
@@ -115,6 +136,7 @@ class SpotROS:
         self.callbacks["rear_image"] = self.RearImageCB
         self.callbacks["hand_image"] = self.HandImageCB
         self.callbacks["lidar_points"] = self.PointCloudCB
+        self.callbacks["local_grid"] = self.LocalGridCB
         self.active_camera_tasks = []
         self.camera_pub_to_async_task_mapping = {}
 
@@ -1009,7 +1031,9 @@ class SpotROS:
             rospy.logerr("cmd_vel received a message but motion is not allowed.")
             return
 
-        self.spot_wrapper.velocity_cmd(data.linear.x, data.linear.y, data.angular.z)
+        self.spot_wrapper.velocity_cmd(
+            data.linear.x, data.linear.y, data.angular.z, self.cmd_duration
+        )
 
     def in_motion_or_idle_pose_cb(self, data):
         """
@@ -1309,7 +1333,124 @@ class SpotROS:
             frame=srv_data.frame_name,
             object_rt_frame=srv_data.object_rt_frame,
         )
-        return Grasp3dResponse(resp[0], resp[1])
+        resp2 = self.spot_wrapper.unified_pickup(resp)
+        return Grasp3dResponse(resp2[0], resp2[1])
+
+    ##################################################################
+
+    # Arm functions-custom ###########################################
+    def handle_grasp_in_image(self, srv_data):
+        """ROS service handler to command the grasp object in image"""
+        camera_name = srv_data.camera_name
+        coords = (srv_data.px_coords.x, srv_data.px_coords.y)
+        resp = self.spot_wrapper.grasp_in_image(camera_name, coords)
+        resp2 = self.spot_wrapper.unified_pickup(resp)
+        return GraspInImageResponse(resp2[0], resp2[1])
+
+    def handle_cartesian_trajectory(self, srv_data):
+        """ROS service handler to command the arm cartesian trajectory"""
+        root_frame = srv_data.root_frame
+        traj_time = srv_data.traj_time
+        poses = []
+        for pose in srv_data.poses:
+            pos = (pose.position.x, pose.position.y, pose.position.z)
+            rot = (
+                pose.orientation.x,
+                pose.orientation.y,
+                pose.orientation.z,
+                pose.orientation.w,
+            )
+            poses += [[pos, rot]]
+        resp = self.spot_wrapper.cartesian_trajectory(root_frame, traj_time, poses)
+        return ArmCartesianTrajectoryResponse(resp)
+
+    def handle_arm_gaze(self, srv_data):
+        """ROS service handler to command the arm gaze"""
+        p = srv_data.point
+        resp = self.spot_wrapper.arm_gaze([p.x, p.y, p.z], srv_data.frame_name)
+        return ArmGazeResponse(resp)
+
+    ##################################################################
+
+    # Local grid #####################################################
+    def LocalGridCB(self, results):
+        """Callback for when the Spot Wrapper gets new local grid data.
+
+        Args:
+            results: FutureWrapper object of AsyncPeriodicQuery callback
+        """
+        # TODO: this takes just the first returned grid, make it work with more grids in the response
+        grid = self.spot_wrapper.local_grids[0].local_grid
+        if grid:
+            extent = grid.extent
+
+            # decode
+            data_grid = rle_decode(
+                grid.data,
+                grid.rle_counts,
+                grid_dtypes[grid.cell_format],
+                (extent.num_cells_x, extent.num_cells_y),
+                grid.cell_value_scale,
+                grid.cell_value_offset,
+            )
+            if data_grid is None:
+                rospy.logwarn("Received local grid with unknown datatype")
+                return
+
+            # obtain the grid origin in vision frame
+            pose = get_a_tform_b(
+                grid.transforms_snapshot, "vision", grid.frame_name_local_grid_data
+            )
+
+            # transform the costmap into occupancy grid, leave some margin around untraversable regions
+            occ = np.zeros_like(data_grid)
+            threshold = np.max(data_grid) / 10.0
+            occ[data_grid <= threshold] = 99
+            occ_l = (
+                occ.T.reshape((extent.num_cells_x * extent.num_cells_y))
+                .astype(int)
+                .tolist()
+            )
+
+            # build the OccupancyGrid message
+            o = OccupancyGrid()
+            o.header.stamp = rospy.Time.now()
+            o.header.frame_id = "vision"
+            o.info.map_load_time = rospy.Time.now()
+            o.info.resolution = extent.cell_size
+            o.info.width = extent.num_cells_x
+            o.info.height = extent.num_cells_y
+            o.info.origin.position.x = pose.x
+            o.info.origin.position.y = pose.y
+            o.info.origin.orientation.w = pose.rot.w
+            o.info.origin.orientation.x = pose.rot.x
+            o.info.origin.orientation.y = pose.rot.y
+            o.info.origin.orientation.z = pose.rot.z
+            o.data = occ_l
+            self.occ_pub.publish(o)
+
+            # publish costmap as PointCloud2
+            mat = pose.to_matrix()
+            points = []
+            for x in range(data_grid.shape[0]):
+                for y in range(data_grid.shape[1]):
+                    points.append(
+                        [
+                            extent.cell_size / 2 + x * extent.cell_size,
+                            extent.cell_size / 2 + y * extent.cell_size,
+                            data_grid[x, y],
+                            1,
+                        ]
+                    )
+
+            p_arr = np.array(points)
+            p_tf = np.matmul(mat, p_arr.T).T
+            p_list = p_tf[:, 0:3].tolist()
+            h = Header()
+            h.stamp = rospy.Time.now()
+            h.frame_id = "vision"
+            cloud = pc2.create_cloud_xyz32(h, p_list)
+            self.grid_pub.publish(cloud)
 
     ##################################################################
 
@@ -1474,6 +1615,7 @@ class SpotROS:
         self.use_take_lease = rospy.get_param("~use_take_lease", False)
         self.get_lease_on_action = rospy.get_param("~get_lease_on_action", False)
         self.is_charging = False
+        self.cmd_duration = rospy.get_param("~cmd_duration")
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
@@ -1686,6 +1828,10 @@ class SpotROS:
             "status/mobility_params", MobilityParams, queue_size=10
         )
 
+        # Local grid
+        self.grid_pub = rospy.Publisher("no_step/raw", PointCloud2, queue_size=1)
+        self.occ_pub = rospy.Publisher("no_step", OccupancyGrid, queue_size=1)
+
         rospy.Subscriber("cmd_vel", Twist, self.cmdVelCallback, queue_size=1)
         rospy.Subscriber(
             "go_to_pose", PoseStamped, self.trajectory_callback, queue_size=1
@@ -1744,6 +1890,16 @@ class SpotROS:
         )
         rospy.Service("gripper_pose", HandPose, self.handle_hand_pose)
         rospy.Service("grasp_3d", Grasp3d, self.handle_grasp_3d)
+        #########################################################
+
+        # Arm Services-custom ###################################
+        rospy.Service("grasp_in_image", GraspInImage, self.handle_grasp_in_image)
+        rospy.Service(
+            "arm_cartesian_trajectory",
+            ArmCartesianTrajectory,
+            self.handle_cartesian_trajectory,
+        )
+        rospy.Service("arm_gaze", ArmGaze, self.handle_arm_gaze)
         #########################################################
 
         self.navigate_as = actionlib.SimpleActionServer(

@@ -15,8 +15,10 @@ rates:
   mobility_params: 10.0
   check_subscribers: 10.0
 
+cmd_duration: 0.6  #default is 0.125, but it has to be increased to avoid bosdyn.client.robot_command.ExpiredError
+
 # If true, automatically claim the lease when the driver starts
-auto_claim: False
+auto_claim: True
 # If true, automatically power on when the driver starts (requires auto_claim)
 auto_power_on: False
 # If true, automatically stand when the driver starts (requires auto_power_on)
